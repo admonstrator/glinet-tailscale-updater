@@ -4,7 +4,7 @@
 # Description: This script updates tailscale on GL.iNet routers
 # Thread: https://forum.gl-inet.com/t/how-to-update-tailscale-on-arm64/37582
 # Author: Admon
-SCRIPT_VERSION="2026.02.02.01"
+SCRIPT_VERSION="2026.03.10.01"
 SCRIPT_NAME="update-tailscale.sh"
 UPDATE_URL="https://get.admon.me/tailscale-update"
 TAILSCALE_TINY_URL="https://github.com/Admonstrator/glinet-tailscale-updater/releases/latest/download/"
@@ -588,9 +588,9 @@ invoke_intro() {
     echo ""
     echo "============================================================"
     echo ""
-    echo "  WARNING: THIS SCRIPT MIGHT HARM YOUR ROUTER!"
-    echo "  Use at your own risk. Only proceed if you know"
-    echo "  what you're doing."
+    printf " \033[36mTired of using SSH and manual scripts to manage Tailscale?\033[0m\n"
+    printf " \033[36mTry the new Tailscale Web UI for GL routers by @remotetohome.io\033[0m\n"
+    printf " \033[36mCheck https://link.admon.me/tailscale-ui\033[0m\n"
     echo ""
     echo "============================================================"
     echo ""
