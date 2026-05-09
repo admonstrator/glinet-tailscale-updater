@@ -107,6 +107,8 @@ jobs:
           path: repo
       - name: Apply nft fwmark native-endian patch (remove when upstream #19601 is in release)
         run: patch -p1 < repo/patches/0001-fix-nftables-fwmark-endianness.patch
+      - name: Apply nft connmark restore coexistence patch (GL policy marks / skb fwmark)
+        run: patch -p1 < repo/patches/0002-nft-connmark-restore-gl-coexist.patch
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
