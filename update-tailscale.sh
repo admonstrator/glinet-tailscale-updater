@@ -4,7 +4,7 @@
 # Description: This script updates tailscale on GL.iNet routers
 # Thread: https://forum.gl-inet.com/t/how-to-update-tailscale-on-arm64/37582
 # Author: Admon
-SCRIPT_VERSION="2026.05.06.01"
+SCRIPT_VERSION="2026.05.20.01"
 SCRIPT_NAME="update-tailscale.sh"
 UPDATE_URL="https://get.admon.me/tailscale-update"
 TAILSCALE_TINY_URL="https://github.com/Admonstrator/glinet-tailscale-updater/releases/latest/download/"
@@ -24,7 +24,6 @@ NO_DOWNLOAD=0
 NO_TINY=0
 SELECT_RELEASE=0
 SHOW_LOG=0
-ASCII_MODE=0
 TESTING=0
 ENABLE_SSH=0
 SKIP_CONFIG=0
@@ -56,34 +55,18 @@ log() {
     case "$level" in
     ERROR)
         color=$RED
-        if [ "$ASCII_MODE" -eq 1 ]; then
-            symbol="[X] "
-        else
-            symbol="❌ "
-        fi
+        symbol="[X] "
         ;;
     WARNING)
         color=$YELLOW
-        if [ "$ASCII_MODE" -eq 1 ]; then
-            symbol="[!] "
-        else
-            symbol="⚠️  "
-        fi
+        symbol="[!] "
         ;;
     SUCCESS)
         color=$GREEN
-        if [ "$ASCII_MODE" -eq 1 ]; then
-            symbol="[OK] "
-        else
-            symbol="✅ "
-        fi
+        symbol="[OK] "
         ;;
     INFO)
-        if [ "$ASCII_MODE" -eq 1 ]; then
-            symbol="[->] "
-        else
-            symbol="ℹ️  "
-        fi
+        symbol="[->] "
         ;;
     esac
 
@@ -580,7 +563,6 @@ invoke_help() {
     printf "  \033[93m--skip-config\033[0m        \033[97mSkip automatic configuration and show manual steps instead\033[0m\n"
     printf "  \033[93m--testing\033[0m            \033[97mUse testing/prerelease versions from testing branch\033[0m\n"
     printf "  \033[93m--log\033[0m                \033[97mShow timestamps in log messages\033[0m\n"
-    printf "  \033[93m--ascii\033[0m              \033[97mUse ASCII characters instead of emojis\033[0m\n"
     printf "  \033[93m--help\033[0m               \033[97mShow this help\033[0m\n"
 }
 
@@ -899,9 +881,6 @@ parse_arguments() {
             ;;
         --log)
             SHOW_LOG=1
-            ;;
-        --ascii)
-            ASCII_MODE=1
             ;;
         --force-upgrade)
             FORCE_UPGRADE=1

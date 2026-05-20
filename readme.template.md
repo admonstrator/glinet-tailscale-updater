@@ -86,7 +86,6 @@ The `update-tailscale.sh` script supports the following arguments:
 | `--testing` | Uses prerelease/testing versions from the testing branch. ⚠️ Use at your own risk! May contain bugs or experimental features. |
 | `--ssh` | Enables Tailscale SSH feature after installation. |
 | `--log` | Shows timestamps in all log messages. Useful for debugging and tracking execution time. |
-| `--ascii` | Uses ASCII characters (`[OK]`, `[X]`, `[!]`, `[->]`) instead of emojis for compatibility with older terminals. |
 | `--help` | Displays help message with all available arguments. |
 
 ---
@@ -153,18 +152,6 @@ Enable timestamps for debugging or tracking execution time:
 
 ```bash
 wget -q https://get.admon.me/tailscale -O update-tailscale.sh ; sh update-tailscale.sh --log
-```
-
-Use ASCII characters instead of emojis for compatibility with older terminals:
-
-```bash
-wget -q https://get.admon.me/tailscale -O update-tailscale.sh ; sh update-tailscale.sh --ascii
-```
-
-Combine both options:
-
-```bash
-wget -q https://get.admon.me/tailscale -O update-tailscale.sh ; sh update-tailscale.sh --log --ascii
 ```
 
 ---
