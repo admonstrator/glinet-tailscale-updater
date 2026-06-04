@@ -143,7 +143,7 @@ jobs:
           # 4. SECURITY & AUTH
           KEEP="${KEEP},acme,bakedroots,tailnetlock,unixsocketidentity"
           # 5. EXTRA                                         
-          KEEP="${KEEP},appconnectors,cachenetmap,colorable,conn25,debug,gro"        
+          KEEP="${KEEP},appconnectors,cachenetmap,colorable,conn25,debug,gro,ipnbus"        
           KEEP="${KEEP},hujsonconf,lazywg,listenrawdisco,portlist,serve,ssh,useproxy,relayserver"
           # Finalize build tags
           BUILD_TAGS=$(go run ./cmd/featuretags --min --add="${KEEP}")
