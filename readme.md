@@ -6,7 +6,7 @@
 
 **Keep Tailscale up-to-date on your GL.iNet router with ease!**
 
-[![Latest Release](https://img.shields.io/badge/release-v1.98.5-blue?style=for-the-badge&logo=github)](https://github.com/Admonstrator/glinet-tailscale-updater/releases/latest) [![License](https://img.shields.io/github/license/Admonstrator/glinet-tailscale-updater?style=for-the-badge)](LICENSE) [![Stars](https://img.shields.io/badge/stars-652-brightgreen?style=for-the-badge&logo=github)](https://github.com/Admonstrator/glinet-tailscale-updater/stargazers)
+[![Latest Release](https://img.shields.io/github/v/release/Admonstrator/glinet-tailscale-updater?style=for-the-badge&logo=github&color=blue)](https://github.com/Admonstrator/glinet-tailscale-updater/releases/latest) [![License](https://img.shields.io/github/license/Admonstrator/glinet-tailscale-updater?style=for-the-badge)](LICENSE) [![Stars](https://img.shields.io/github/stars/Admonstrator/glinet-tailscale-updater?style=for-the-badge&logo=github)](https://github.com/Admonstrator/glinet-tailscale-updater/stargazers) [![Forks](https://img.shields.io/github/forks/Admonstrator/glinet-tailscale-updater?style=for-the-badge&logo=github)](https://github.com/Admonstrator/glinet-tailscale-updater/network/members) [![Issues](https://img.shields.io/github/issues/Admonstrator/glinet-tailscale-updater?style=for-the-badge&logo=github)](https://github.com/Admonstrator/glinet-tailscale-updater/issues) [![Last Commit](https://img.shields.io/github/last-commit/Admonstrator/glinet-tailscale-updater?style=for-the-badge&logo=github)](https://github.com/Admonstrator/glinet-tailscale-updater/commits)
 
 ---
 
@@ -270,11 +270,5 @@ This project is part of a comprehensive collection of tools for GL.iNet routers.
 **Made with ❤️ by [Admon](https://github.com/Admonstrator) for the GL.iNet Community**
 
 ⭐ If you find this useful, please star the repository!
-
-</div>
-
-<div align="center">
-
-_Last updated: 2026-06-28_
 
 </div>
