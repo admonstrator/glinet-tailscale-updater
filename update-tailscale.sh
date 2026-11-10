@@ -4,7 +4,7 @@
 # Description: This script updates tailscale on GL.iNet routers
 # Thread: https://forum.gl-inet.com/t/how-to-update-tailscale-on-arm64/37582
 # Author: Admon
-SCRIPT_VERSION="2026.09.26.01"
+SCRIPT_VERSION="2026.11.10.01"
 SCRIPT_NAME="update-tailscale.sh"
 UPDATE_URL="https://get.admon.me/tailscale-update"
 TAILSCALE_TINY_URL="https://github.com/Admonstrator/glinet-tailscale-updater/releases/latest/download/"
@@ -103,6 +103,42 @@ tailscale_bin() {
     else
         printf '%s\n' "$1"
     fi
+}
+
+# Downloads work with curl or wget, whichever is installed (some firmwares
+# ship only one of them). curl is preferred: on OpenWrt 25.x uclient-fetch
+# (wget) stalls until timeout on github.com responses with very large headers.
+http_download() {
+    # Saves URL $1 to file $2. Tries curl first, then wget.
+    # Removes partial files on failure so callers can test with -f
+    rm -f "$2"
+    if command -v curl >/dev/null; then
+        if curl -fsSL --connect-timeout 15 --speed-limit 1 --speed-time 30 -o "$2" "$1"; then
+            return 0
+        fi
+        rm -f "$2"
+        command -v wget >/dev/null && log "WARNING" "curl failed for $1, retrying with wget" >&2
+    fi
+    if command -v wget >/dev/null; then
+        if wget -q -T 30 -O "$2" "$1"; then
+            return 0
+        fi
+        rm -f "$2"
+        command -v curl >/dev/null || log "WARNING" "wget failed for $1 (installing curl may help)" >&2
+    fi
+    return 1
+}
+
+http_get() {
+    # Prints the body of URL $1 to stdout. Buffered through a temp file so a
+    # failed curl attempt never leaves partial output before the wget retry
+    local tmp="/tmp/.http_get.$$"
+    if http_download "$1" "$tmp"; then
+        cat "$tmp"
+        rm -f "$tmp"
+        return 0
+    fi
+    return 1
 }
 
 # ==============================================================================
@@ -226,12 +262,14 @@ preflight_check() {
     else
         log "SUCCESS" "xz is installed."
     fi
-    # Check if wget is present
-    if ! command -v wget >/dev/null; then
-        log "ERROR" "wget is not installed. Exiting"
-        PREFLIGHT=1
-    else
+    # Check if curl or wget is present (one of them is enough)
+    if command -v curl >/dev/null; then
+        log "SUCCESS" "curl is installed."
+    elif command -v wget >/dev/null; then
         log "SUCCESS" "wget is installed."
+    else
+        log "ERROR" "Neither curl nor wget is installed. Exiting"
+        PREFLIGHT=1
     fi
 
     if [ "$PREFLIGHT" -eq "1" ]; then
@@ -305,7 +343,7 @@ get_latest_tailscale_version_tiny() {
     # Will attempt to download the latest version of tailscale from the updater repository
     # This is the default behavior
     log "INFO" "Detecting latest tiny tailscale version"
-    TAILSCALE_VERSION_NEW=$(wget -qO- "$TAILSCALE_TINY_URL/version.txt")
+    TAILSCALE_VERSION_NEW=$(http_get "$TAILSCALE_TINY_URL/version.txt")
     if [ -z "$TAILSCALE_VERSION_NEW" ]; then
         log "ERROR" "Could not get latest tailscale version. Please check your internet connection."
         exit 1
@@ -323,7 +361,7 @@ get_latest_tailscale_version_tiny() {
     fi
     log "INFO" "The latest tailscale version is: $TAILSCALE_VERSION_NEW"
     log "INFO" "Downloading latest tailscale version"
-    wget -q -O "/tmp/tailscaled-linux-$TINY_ARCH" "$TAILSCALE_TINY_URL/tailscaled-linux-$TINY_ARCH"
+    http_download "$TAILSCALE_TINY_URL/tailscaled-linux-$TINY_ARCH" "/tmp/tailscaled-linux-$TINY_ARCH"
     # Check if download was successful
     if [ ! -f "/tmp/tailscaled-linux-$TINY_ARCH" ]; then
         log "ERROR" "Could not download tailscale. Exiting"
@@ -344,19 +382,19 @@ get_latest_tailscale_version() {
     else
         log "INFO" "Detecting latest tailscale version"
         if [ "$ARCH" = "aarch64" ]; then
-            TAILSCALE_VERSION_NEW=$(wget -qO- https://pkgs.tailscale.com/stable/ | grep -o 'tailscale_[0-9]*\.[0-9]*\.[0-9]*_arm64\.tgz' | head -n 1)
+            TAILSCALE_VERSION_NEW=$(http_get https://pkgs.tailscale.com/stable/ | grep -o 'tailscale_[0-9]*\.[0-9]*\.[0-9]*_arm64\.tgz' | head -n 1)
         elif [ "$ARCH" = "armv7l" ]; then
-            TAILSCALE_VERSION_NEW=$(wget -qO- https://pkgs.tailscale.com/stable/ | grep -o 'tailscale_[0-9]*\.[0-9]*\.[0-9]*_arm\.tgz' | head -n 1)
+            TAILSCALE_VERSION_NEW=$(http_get https://pkgs.tailscale.com/stable/ | grep -o 'tailscale_[0-9]*\.[0-9]*\.[0-9]*_arm\.tgz' | head -n 1)
         elif [ "$ARCH" = "x86_64" ]; then
-            TAILSCALE_VERSION_NEW=$(wget -qO- https://pkgs.tailscale.com/stable/ | grep -o 'tailscale_[0-9]*\.[0-9]*\.[0-9]*_amd64\.tgz' | head -n 1)
+            TAILSCALE_VERSION_NEW=$(http_get https://pkgs.tailscale.com/stable/ | grep -o 'tailscale_[0-9]*\.[0-9]*\.[0-9]*_amd64\.tgz' | head -n 1)
         elif [ "$ARCH" = "mips" ]; then
             MIPS_ARCH=$(sed -n "s/^DISTRIB_ARCH='\(.*\)_.*'$/\1/p" /etc/openwrt_release)
             case "$MIPS_ARCH" in
                 "mipsel" | "mips_24kc")
-                    TAILSCALE_VERSION_NEW=$(wget -qO- https://pkgs.tailscale.com/stable/ | grep -o 'tailscale_[0-9]*\.[0-9]*\.[0-9]*_mipsle\.tgz' | head -n 1)
+                    TAILSCALE_VERSION_NEW=$(http_get https://pkgs.tailscale.com/stable/ | grep -o 'tailscale_[0-9]*\.[0-9]*\.[0-9]*_mipsle\.tgz' | head -n 1)
                     ;;
                 *)
-                    TAILSCALE_VERSION_NEW=$(wget -qO- https://pkgs.tailscale.com/stable/ | grep -o 'tailscale_[0-9]*\.[0-9]*\.[0-9]*_mips\.tgz' | head -n 1)
+                    TAILSCALE_VERSION_NEW=$(http_get https://pkgs.tailscale.com/stable/ | grep -o 'tailscale_[0-9]*\.[0-9]*\.[0-9]*_mips\.tgz' | head -n 1)
                     ;;
             esac
         fi
@@ -373,7 +411,7 @@ get_latest_tailscale_version() {
         fi
         log "INFO" "The latest tailscale version is: $TAILSCALE_VERSION_NEW"
         log "INFO" "Downloading latest tailscale version"
-        wget -q -O /tmp/tailscale.tar.gz "https://pkgs.tailscale.com/stable/$TAILSCALE_VERSION_NEW"
+        http_download "https://pkgs.tailscale.com/stable/$TAILSCALE_VERSION_NEW" /tmp/tailscale.tar.gz
         # Check if download was successful
     fi
     if [ ! -f "/tmp/tailscale.tar.gz" ]; then
@@ -420,7 +458,7 @@ compress_binaries() {
     fi
     log "INFO" "Getting UPX"
     upx_version="$(
-        wget -qO- "https://api.github.com/repos/upx/upx/releases/latest" |
+        http_get "https://api.github.com/repos/upx/upx/releases/latest" |
             grep -o '"tag_name":"[^"]*"' |
             sed 's/"tag_name":"//' |
             sed 's/"//' |
@@ -437,8 +475,9 @@ compress_binaries() {
         UPX_ARCH="$ARCH"
     fi
 
-    wget -q -O "/tmp/upx.tar.xz" \
-        "https://github.com/upx/upx/releases/download/v${upx_version}/upx-${upx_version}-${UPX_ARCH}_linux.tar.xz"
+    http_download \
+        "https://github.com/upx/upx/releases/download/v${upx_version}/upx-${upx_version}-${UPX_ARCH}_linux.tar.xz" \
+        "/tmp/upx.tar.xz"
 
     # If download fails, skip compression
     if [ ! -f "/tmp/upx.tar.xz" ]; then
@@ -866,7 +905,7 @@ collect_user_preferences() {
 
 choose_release_label() {
     log "INFO" "Fetching available release labels..."
-    available_labels=$(wget -qO- "https://api.github.com/repos/admonstrator/glinet-tailscale-updater/releases" | grep '"tag_name"' | sed 's/.*": "\([^"]*\)".*/\1/')
+    available_labels=$(http_get "https://api.github.com/repos/admonstrator/glinet-tailscale-updater/releases" | grep '"tag_name"' | sed 's/.*": "\([^"]*\)".*/\1/')
     
     if [ -z "$available_labels" ]; then
         log "ERROR" "Could not retrieve release labels. Please check your internet connection."
@@ -913,11 +952,15 @@ invoke_update() {
         update_url="https://raw.githubusercontent.com/admonstrator/glinet-tailscale-updater/testing/update-tailscale.sh"
         log "INFO" "Testing mode: Using testing branch for script updates"
     fi
-    SCRIPT_VERSION_NEW=$(wget -qO- "$update_url" | grep -o 'SCRIPT_VERSION="[0-9]\{4\}\.[0-9]\{2\}\.[0-9]\{2\}\.[0-9]\{2\}"' | cut -d '"' -f 2 || echo "Failed to retrieve scriptversion")
+    SCRIPT_VERSION_NEW=$(http_get "$update_url" | grep -o 'SCRIPT_VERSION="[0-9]\{4\}\.[0-9]\{2\}\.[0-9]\{2\}\.[0-9]\{2\}"' | cut -d '"' -f 2 || echo "Failed to retrieve scriptversion")
     if [ -n "$SCRIPT_VERSION_NEW" ] && [ "$SCRIPT_VERSION_NEW" != "$SCRIPT_VERSION" ]; then
         log "WARNING" "A new version of the script is available: $SCRIPT_VERSION_NEW"
         log "INFO" "Updating the script ..."
-        wget -q -O "/tmp/$SCRIPT_NAME" "$update_url"
+        if ! http_download "$update_url" "/tmp/$SCRIPT_NAME" || [ ! -s "/tmp/$SCRIPT_NAME" ]; then
+            log "ERROR" "Could not download the new script version. Continuing with the current one"
+            rm -f "/tmp/$SCRIPT_NAME"
+            return 0
+        fi
         # Get current script path
         SCRIPT_PATH=$(readlink -f "$0")
         # Replace current script with updated script
