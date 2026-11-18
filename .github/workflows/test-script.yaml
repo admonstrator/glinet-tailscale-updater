@@ -682,6 +682,222 @@ jobs:
             -v "$RUNNER_TEMP/test_glkvm.sh:/src/test_glkvm.sh:ro" \
             -w /src alpine:3.20 sh /src/test_glkvm.sh
 
+  tiny-variant-tests:
+    name: Tiny Build Variant Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Write tiny build variant test
+        run: |
+          cat > "$RUNNER_TEMP/test_tiny_variant.sh" << 'EOF'
+          #!/bin/sh
+          # Tiny build variant tests (issue #95). /src = repo, /bin_small = 20 MB tmpfs
+          set -u
+          # Synthetic stand-ins: a UPX packed binary carries the UPX! magic, the
+          # uncompressed build does not and is larger than /bin_small
+          mkdir -p /tmp/assets
+          { printf 'UPX!'; dd if=/dev/zero bs=1024 count=6000 2>/dev/null; } >/tmp/assets/upx
+          dd if=/dev/zero of=/tmp/assets/raw bs=1024 count=27000 2>/dev/null
+          PASS=0
+          FAIL=0
+          ok() { PASS=$((PASS + 1)); echo "PASS: $1"; }
+          ko() { FAIL=$((FAIL + 1)); echo "FAIL: $1"; }
+
+          sed '$d' /src/update-tailscale.sh >/tmp/lib.sh
+          # shellcheck disable=SC1091
+          . /tmp/lib.sh
+
+          # --- 0. http_download: retry with wget only when curl got no answer ----------
+          FAKEBIN=/tmp/fakebin
+          mkdir -p "$FAKEBIN"
+          WGET_LOG=/tmp/wget-calls.log
+          printf '#!/bin/sh\necho "$*" >>%s\nexit 0\n' "$WGET_LOG" >"$FAKEBIN/wget"
+          chmod +x "$FAKEBIN/wget"
+          OLD_PATH=$PATH
+          PATH="$FAKEBIN:$PATH"
+          for case in "22:0" "7:1" "6:1" "0:0"; do
+              curl_rc=${case%%:*}
+              want_wget=${case#*:}
+              printf '#!/bin/sh\nexit %s\n' "$curl_rc" >"$FAKEBIN/curl"
+              chmod +x "$FAKEBIN/curl"
+              rm -f "$WGET_LOG"
+              http_download "https://example.invalid/file" /tmp/dl >/dev/null 2>&1
+              rc=$?
+              got_wget=0
+              [ -f "$WGET_LOG" ] && got_wget=1
+              if [ "$got_wget" -eq "$want_wget" ]; then
+                  ok "curl exit $curl_rc -> wget called: $got_wget (http_download rc=$rc)"
+              else
+                  ko "curl exit $curl_rc -> wget called: $got_wget, expected $want_wget"
+              fi
+          done
+          printf '#!/bin/sh\nexit 22\n' >"$FAKEBIN/curl"
+          http_download "https://example.invalid/file" /tmp/dl >/dev/null 2>&1 && ko "HTTP error reported as success" || ok "HTTP error returns non-zero"
+          PATH=$OLD_PATH
+          rm -rf "$FAKEBIN" "$WGET_LOG" /tmp/dl
+
+          # --- Mocks -------------------------------------------------------------------
+          SERVE=/tmp/serve
+          mkdir -p "$SERVE"
+          http_download() {
+              rm -f "$2"
+              name=${1##*/}
+              [ -f "$SERVE/$name" ] || return 1
+              cp "$SERVE/$name" "$2" 2>/dev/null || { rm -f "$2"; return 1; }
+          }
+          http_get() { cat "$SERVE/${1##*/}" 2>/dev/null; }
+          stop_tailscale() { :; }
+          start_tailscale() { :; }
+          FAKE_VERSION=/tmp/fakever
+          mkdir -p "$FAKE_VERSION"
+          printf '#!/bin/sh\necho 1.104.7-tiny.by.admon.1457\n' >"$FAKE_VERSION/tailscale"
+          chmod +x "$FAKE_VERSION/tailscale"
+          tailscale_bin() { echo "$FAKE_VERSION/tailscale"; }
+          TINY_ARCH=mipsle
+          TAILSCALE_TINY_URL="https://example.invalid/latest/download/"
+
+          reset_env() {
+              rm -rf "$SERVE"/* /tmp/tailscaled-linux-*
+              BIN=$1
+              TAILSCALE_BIN_DIR=$BIN
+              rm -f "$BIN"/tailscaled "$BIN"/tailscale "$BIN"/tailscaled.new
+              NO_UPX=0
+              FORCE_UPGRADE=0
+              IGNORE_FREE_SPACE=0
+              TINY_VARIANT=upx
+              echo "1.104.7-tiny.by.admon.1457" >"$SERVE/version.txt"
+              cp /tmp/assets/upx "$SERVE/tailscaled-linux-mipsle"
+              cp /tmp/assets/raw "$SERVE/tailscaled-noupx-linux-mipsle"
+          }
+
+          BIG=/tmp/bigbin
+          mkdir -p "$BIG"
+
+          # --- 1. Helpers ----------------------------------------------------------------
+          is_upx_packed /tmp/assets/upx && ok "busybox grep detects UPX asset" || ko "UPX asset not detected"
+          is_upx_packed /tmp/assets/raw && ko "uncompressed asset seen as UPX" || ok "uncompressed asset not UPX"
+          is_upx_packed /nonexistent && ko "missing file seen as UPX" || ok "missing file not UPX"
+          m=$(mem_total_mb); [ "$m" -gt 0 ] 2>/dev/null && ok "mem_total_mb=$m" || ko "mem_total_mb='$m'"
+          f=$(free_space_mb /bin_small); [ "$f" -ge 0 ] 2>/dev/null && [ "$f" -lt 35 ] && ok "free_space_mb small=$f" || ko "free_space_mb small='$f'"
+
+          # --- 2. Same version, UPX installed, no flag -> exits as up to date -----------
+          reset_env "$BIG"
+          cp /tmp/assets/upx "$BIG/tailscaled"
+          out=$( (get_latest_tailscale_version_tiny) 2>&1); rc=$?
+          echo "$out" | grep -q "already on the latest" && [ "$rc" -eq 0 ] && ok "same version + UPX installed -> up to date" || ko "same version upx: rc=$rc $out"
+
+          # --- 3. Same version, UPX installed, --no-upx -> switches, downloads to flash --
+          reset_env "$BIG"
+          cp /tmp/assets/upx "$BIG/tailscaled"
+          NO_UPX=1
+          get_latest_tailscale_version_tiny >/tmp/out3 2>&1
+          if [ "$TINY_VARIANT" = noupx ] && [ "$TINY_DOWNLOAD_PATH" = "$BIG/tailscaled.new" ] && [ -s "$BIG/tailscaled.new" ] && grep -q "Switching to the uncompressed" /tmp/out3; then
+              ok "switch UPX -> noupx downloads to $BIG/tailscaled.new"
+          else
+              ko "switch to noupx"; cat /tmp/out3
+          fi
+          install_tiny_tailscale >/dev/null 2>&1
+          if [ -f "$BIG/tailscaled" ] && ! is_upx_packed "$BIG/tailscaled" && [ -L "$BIG/tailscale" ] && [ ! -e "$BIG/tailscaled.new" ]; then
+              ok "install noupx: binary replaced, symlink set, .new gone"
+          else
+              ko "install noupx"; ls -la "$BIG"
+          fi
+
+          # --- 4. noupx installed, same version, --no-upx -> up to date --------------------
+          NO_UPX=1
+          rm -rf "$SERVE"/*; echo "1.104.7-tiny.by.admon.1457" >"$SERVE/version.txt"
+          out=$( (get_latest_tailscale_version_tiny) 2>&1); rc=$?
+          echo "$out" | grep -q "already on the latest" && [ "$rc" -eq 0 ] && ok "noupx installed + --no-upx -> up to date" || ko "noupx up to date: $out"
+
+          # --- 5. noupx installed, same version, no flag -> switches back to UPX ----------
+          reset_env "$BIG"
+          cp /tmp/assets/raw "$BIG/tailscaled"
+          get_latest_tailscale_version_tiny >/tmp/out5 2>&1
+          [ "$TINY_VARIANT" = upx ] && [ -s /tmp/tailscaled-linux-mipsle ] && grep -q "Switching to the UPX" /tmp/out5 && ok "switch noupx -> UPX via /tmp" || { ko "switch back"; cat /tmp/out5; }
+
+          # --- 6. --no-upx but release has no noupx asset -> fallback to UPX -------------
+          reset_env "$BIG"
+          rm "$SERVE/tailscaled-noupx-linux-mipsle"
+          echo "1.106.0-tiny.by.admon.1500" >"$SERVE/version.txt"
+          NO_UPX=1
+          get_latest_tailscale_version_tiny >/tmp/out6 2>&1
+          [ "$TINY_VARIANT" = upx ] && [ -s /tmp/tailscaled-linux-mipsle ] && [ ! -e "$BIG/tailscaled.new" ] && grep -q "Older releases do not provide it" /tmp/out6 && ok "missing noupx asset -> UPX fallback" || { ko "asset fallback"; cat /tmp/out6; }
+
+          # --- 7. --no-upx but not enough flash -> fallback to UPX ------------------------
+          reset_env /bin_small
+          echo "1.106.0-tiny.by.admon.1500" >"$SERVE/version.txt"
+          NO_UPX=1
+          get_latest_tailscale_version_tiny >/tmp/out7 2>&1
+          [ "$TINY_VARIANT" = upx ] && [ -s /tmp/tailscaled-linux-mipsle ] && grep -q "Falling back to the UPX compressed tiny build" /tmp/out7 && ok "low flash -> UPX fallback" || { ko "space fallback"; cat /tmp/out7; }
+
+          # --- 8. --no-upx + --ignore-free-space on tiny flash -> download fails, fallback
+          reset_env /bin_small
+          echo "1.106.0-tiny.by.admon.1500" >"$SERVE/version.txt"
+          NO_UPX=1; IGNORE_FREE_SPACE=1
+          get_latest_tailscale_version_tiny >/tmp/out8 2>&1
+          [ "$TINY_VARIANT" = upx ] && [ ! -e /bin_small/tailscaled.new ] && [ -s /tmp/tailscaled-linux-mipsle ] && ok "ignore-free-space + full flash -> partial removed, UPX fallback" || { ko "ignore-free-space"; cat /tmp/out8; ls -la /bin_small; }
+
+          # --- 9. Low RAM hint ------------------------------------------------------------
+          reset_env "$BIG"
+          mem_total_mb() { echo 117; }
+          select_tiny_variant >/tmp/out9 2>&1
+          grep -q "only 117 MB RAM" /tmp/out9 && [ "$TINY_VARIANT" = upx ] && ok "low RAM hint, default stays UPX" || { ko "low ram hint"; cat /tmp/out9; }
+          mem_total_mb() { echo 512; }
+          select_tiny_variant >/tmp/out9b 2>&1
+          grep -q "MB RAM" /tmp/out9b && ko "hint on 512 MB" || ok "no hint on 512 MB"
+
+          # --- 10. --no-tiny space check ---------------------------------------------------
+          TAILSCALE_SUBDIR_IN_TAR=tailscale_1.0_mipsle
+          mkdir -p /tmp/tailscale/$TAILSCALE_SUBDIR_IN_TAR
+          cp /tmp/assets/raw /tmp/tailscale/$TAILSCALE_SUBDIR_IN_TAR/tailscaled
+          cp /tmp/assets/upx /tmp/tailscale/$TAILSCALE_SUBDIR_IN_TAR/tailscale
+          TAILSCALE_BIN_DIR=$BIG; IGNORE_FREE_SPACE=0
+          out=$( (check_space_for_full_binaries) 2>&1); rc=$?
+          [ "$rc" -eq 0 ] && ok "no-tiny space ok on big disk: $out" || ko "no-tiny big: $out"
+          TAILSCALE_BIN_DIR=/bin_small
+          out=$( (check_space_for_full_binaries) 2>&1); rc=$?
+          [ "$rc" -eq 1 ] && echo "$out" | grep -q "Not enough space" && ok "no-tiny aborts on small disk" || ko "no-tiny small rc=$rc $out"
+          mkdir -p /tmp/tailscale/$TAILSCALE_SUBDIR_IN_TAR
+          cp /tmp/assets/raw /tmp/tailscale/$TAILSCALE_SUBDIR_IN_TAR/tailscaled
+          IGNORE_FREE_SPACE=1
+          out=$( (check_space_for_full_binaries) 2>&1); rc=$?
+          [ "$rc" -eq 0 ] && echo "$out" | grep -q "ignore-free-space" && ok "no-tiny + ignore-free-space continues" || ko "no-tiny ignore rc=$rc $out"
+          # reclaimable: overlay upper missing -> 0, regular file -> size
+          cp /tmp/assets/upx "$BIG/tailscaled"; ln -sf "$BIG/tailscaled" "$BIG/tailscale"
+          r=$(reclaimable_kb "$BIG/tailscaled"); [ "$r" -gt 0 ] && ok "reclaimable without overlay=$r KB" || ko "reclaimable=$r"
+          r=$(reclaimable_kb "$BIG/tailscale"); [ "$r" -eq 0 ] && ok "symlink reclaims 0" || ko "symlink reclaim=$r"
+
+          mkdir -p /overlay/upper
+          r=$(reclaimable_kb "$BIG/tailscaled"); [ "$r" -eq 0 ] && ok "overlay: lower-layer file reclaims 0" || ko "overlay lower reclaim=$r"
+          mkdir -p "/overlay/upper$BIG"; touch "/overlay/upper$BIG/tailscaled"
+          r=$(reclaimable_kb "$BIG/tailscaled"); [ "$r" -gt 0 ] && ok "overlay: upper-layer file reclaims $r KB" || ko "overlay upper reclaim=$r"
+          rm -rf /overlay
+
+          # --- 11. --no-tiny + --no-upx message -------------------------------------------
+          NO_TINY=1; NO_UPX=1; FORCE=1; IS_GLINET=0
+          out=$(collect_user_preferences 2>&1)
+          echo "$out" | grep -q "no effect together with --no-tiny" && ok "--no-tiny --no-upx message" || ko "message: $out"
+          NO_TINY=0; NO_UPX=0; NO_DOWNLOAD=1
+          out=$(collect_user_preferences 2>&1)
+          echo "$out" | grep -q "only works together with --no-tiny" && ok "--no-download without --no-tiny message" || ko "no-download message: $out"
+          NO_TINY=1
+          out=$(collect_user_preferences 2>&1)
+          echo "$out" | grep -q "only works together with --no-tiny" && ko "no-download message shown with --no-tiny" || ok "--no-tiny --no-download stays silent"
+
+          echo "== $PASS passed, $FAIL failed"
+          [ "$FAIL" -eq 0 ]
+          EOF
+
+      - name: Run tiny build variant tests in an isolated container
+        run: |
+          docker run --rm \
+            -v "$PWD/update-tailscale.sh:/src/update-tailscale.sh:ro" \
+            -v "$RUNNER_TEMP/test_tiny_variant.sh:/src/test_tiny_variant.sh:ro" \
+            --tmpfs /bin_small:size=20m \
+            -w /src alpine:3.20 sh /src/test_tiny_variant.sh
+
   log-function-tests:
     name: Log Function Tests
     runs-on: ubuntu-latest
@@ -793,7 +1009,10 @@ jobs:
             "backup"
             "get_latest_tailscale_version_tiny"
             "get_latest_tailscale_version"
-            "compress_binaries"
+            "set_tiny_asset"
+            "select_tiny_variant"
+            "is_upx_packed"
+            "check_space_for_full_binaries"
             "cleanup_stale_binaries"
             "install_tailscale"
             "install_tiny_tailscale"

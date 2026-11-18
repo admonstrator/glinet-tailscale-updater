@@ -35,7 +35,7 @@ Created by [Admon](https://forum.gl-inet.com/u/admon/) for the GL.iNet community
 
 - 🚀 **Automatic Updates** – Fetches and installs the latest Tailscale version
 - 📦 **Tiny Version Support** – Uses optimized tiny binaries to save space
-- 🗜️ **UPX Compression** – Further reduces binary size when needed
+- 🧠 **Low-RAM Option** – Uncompressed tiny build for devices with 128 MB RAM (`--no-upx`)
 - 🔒 **Tailscale SSH Ready** – Enables secure SSH access to the router via Tailscale
 - 🎯 **Version Selection** – Install specific Tailscale versions
 - 🔧 **Stateful Filtering** – Auto-configures for exit node compatibility
@@ -80,9 +80,9 @@ The `update-tailscale.sh` script supports the following arguments:
 | `--force` | Skips all confirmation prompts and makes installation permanent. Ideal for unattended installations. |
 | `--force-upgrade` | Forces upgrade even if the current version is already up to date. Useful for reinstalling the same version. |
 | `--restore` | Restores original firmware binaries (`/usr/sbin/tailscaled` and `/usr/sbin/tailscale`). ⚠️ Does not restore config files! Not available on GL.iNet KVM devices. |
-| `--no-upx` | Skips UPX compression. Binaries will be larger but installation is faster. |
-| `--no-download` | Skips downloading binaries. Use pre-downloaded archive at `/tmp/tailscale.tar.gz`. |
-| `--no-tiny` | Uses full Tailscale binaries instead of tiny version. Not recommended for GL.iNet routers. |
+| `--no-upx` | Installs the uncompressed tiny build. Needs about 35 MB free flash, but uses noticeably less RAM. Recommended for devices with 128 MB RAM. Has no effect with `--no-tiny`. |
+| `--no-download` | Only with `--no-tiny`: skips downloading the full binaries and uses a pre-downloaded official archive at `/tmp/tailscale.tar.gz`. The tiny build is always downloaded. |
+| `--no-tiny` | Installs the official, full Tailscale package from [pkgs.tailscale.com](https://pkgs.tailscale.com/stable/) instead of the tiny build. Needs considerably more space, not recommended for GL.iNet routers. |
 | `--skip-config` | Skips the adjustment of the gl_tailscale script. |
 | `--select-release` | Displays available releases and lets you choose a specific version. ⚠️ Downgrading not officially supported! |
 | `--testing` | Uses prerelease/testing versions from the testing branch. ⚠️ Use at your own risk! May contain bugs or experimental features. |
@@ -180,18 +180,22 @@ If you agree to enable Tailscale SSH during installation (manually or by using `
 By default, the script uses optimized tiny binaries that:
 - 🔹 Significantly reduce storage footprint
 - 🔹 Maintain useful functionality for routers
-- 🔹 Skip UPX compression (already optimized)
+- 🔹 Come UPX compressed (about 6 MB)
 - 🔹 Are recommended for all GL.iNet routers
 
-Use `--no-tiny` if you need the full-sized binaries.
+Use `--no-tiny` if you need the official, full-sized binaries. They come from the official Tailscale package on [pkgs.tailscale.com](https://pkgs.tailscale.com/stable/) and are installed as published, without compression, so they need considerably more free space.
 
-### 🗜️ UPX Compression
+### 🧠 Uncompressed Tiny Build for Low-RAM Devices
 
-For standard (non-tiny) binaries, UPX compression:
-- 🔹 Substantially reduces binary size
-- 🔹 Is recommended for storage-limited devices
-- 🔹 Requires `xz` (auto-installed if missing)
-- 🔹 Can be disabled with `--no-upx`
+A UPX compressed binary unpacks itself into RAM every time it starts, and every `tailscale` CLI call starts it again. On devices with 128 MB RAM (e.g. GL-MG1300) this costs about 17 MB of RAM and can push `tailscaled` into swap ([#95](https://github.com/Admonstrator/glinet-tailscale-updater/issues/95)).
+
+With `--no-upx` the script installs the same tiny build without UPX compression:
+- 🔹 Uses much less RAM, no unpacking at start
+- 🔹 Needs about 35 MB free flash (the binary is about 27–30 MB)
+- 🔹 Falls back to the compressed build if there is not enough space or the release has no uncompressed build
+- 🔹 Run the script again without `--no-upx` to switch back
+
+> ⚠️ With a permanent installation the larger binary is also part of the sysupgrade backup.
 
 ### 🖥️ GL.iNet KVM Devices (Comet, Comet Pro)
 
