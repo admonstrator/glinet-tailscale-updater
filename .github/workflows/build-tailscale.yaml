@@ -229,9 +229,18 @@ jobs:
             rmdir -v "${dir}.d"
           done
           chmod -v +x "${{ env.FILE_NAME }}-"*
+      # Issue #95: the UPX build unpacks itself into RAM on every start, which
+      # hurts on 128 MB devices. Keep an uncompressed copy of every binary as
+      # tailscaled-noupx-linux-ARCH. The existing tailscaled-linux-ARCH assets
+      # keep their names and stay UPX compressed for existing consumers.
+      - name: Keep uncompressed copies
+        run: |
+          for file in "${{ env.FILE_NAME }}-linux-"*; do
+            cp -v "$file" "${{ env.FILE_NAME }}-noupx-${file#${{ env.FILE_NAME }}-}"
+          done
       - name: Compress Binary with UPX
         run: |
-          for file in "${{ env.FILE_NAME }}-"*; do
+          for file in "${{ env.FILE_NAME }}-linux-"*; do
             if [[ "$file" == *"mips64"* || "$file" == *"mips64le"* ]]; then
               echo "Skipping UPX compression for $file due to unsupported format"
             else
@@ -286,6 +295,7 @@ jobs:
             * Keeps critical features: DNS, routes, exit nodes, health checks, peer API, NAT traversal, and more
             * Including `unixsocketidentity` feature for proper LocalAPI access control on Unix/OpenWrt systems
             * Including `ssh` feature for Tailscale SSH support
-            * Compressing the binary with UPX
+            * Compressing the binary with UPX (`tailscaled-linux-ARCH`)
+            * Publishing the same binary uncompressed as `tailscaled-noupx-linux-ARCH`. It needs more flash but less RAM, recommended for devices with 128 MB RAM (`./update-tailscale.sh --no-upx`)
 
             To use both programs, rename `tailscaled-OS-ARCH` to `tailscaled` and create a symbolic link (`ln -sv tailscaled tailscale`). When invoked as `tailscale`, it acts as the CLI; when invoked as `tailscaled`, it acts as the daemon.

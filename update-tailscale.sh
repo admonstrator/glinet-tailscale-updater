@@ -4,7 +4,7 @@
 # Description: This script updates tailscale on GL.iNet routers
 # Thread: https://forum.gl-inet.com/t/how-to-update-tailscale-on-arm64/37582
 # Author: Admon
-SCRIPT_VERSION="2026.11.10.01"
+SCRIPT_VERSION="2026.11.18.01"
 SCRIPT_NAME="update-tailscale.sh"
 UPDATE_URL="https://get.admon.me/tailscale-update"
 TAILSCALE_TINY_URL="https://github.com/Admonstrator/glinet-tailscale-updater/releases/latest/download/"
@@ -18,7 +18,6 @@ IGNORE_FREE_SPACE=0
 FORCE=0
 FORCE_UPGRADE=0
 RESTORE=0
-UPX_ERROR=0
 NO_UPX=0
 NO_DOWNLOAD=0
 NO_TINY=0
@@ -29,7 +28,6 @@ ENABLE_SSH=0
 SKIP_CONFIG=0
 
 # Runtime Variables
-USER_WANTS_UPX=""
 USER_WANTS_SSH=""
 USER_WANTS_PERSISTENCE=""
 BACKUP_PATH=""
@@ -39,6 +37,16 @@ FIRMWARE_VERSION=0
 GLKVM_MODEL=""
 GLKVM_VERSION=""
 TAILSCALE_BIN_DIR="/usr/sbin"
+TINY_VARIANT="upx"
+TINY_ASSET=""
+TINY_DOWNLOAD_PATH=""
+
+# Constants - Tiny build variants (issue #95)
+# The uncompressed tiny build is about 27-30 MB. It is downloaded straight
+# into the binary directory, next to the old binary, so it needs this much
+# free space there. Devices below LOW_RAM_MB get a hint about --no-upx.
+NOUPX_MIN_FREE_MB=35
+LOW_RAM_MB=200
 
 # Constants - Colors
 RED='\033[0;31m'
@@ -111,12 +119,20 @@ tailscale_bin() {
 http_download() {
     # Saves URL $1 to file $2. Tries curl first, then wget.
     # Removes partial files on failure so callers can test with -f
+    local rc
     rm -f "$2"
     if command -v curl >/dev/null; then
-        if curl -fsSL --connect-timeout 15 --speed-limit 1 --speed-time 30 -o "$2" "$1"; then
+        curl -fsSL --connect-timeout 15 --speed-limit 1 --speed-time 30 -o "$2" "$1"
+        rc=$?
+        if [ "$rc" -eq 0 ]; then
             return 0
         fi
         rm -f "$2"
+        # 22: the server answered with an HTTP error (404, 403, ...). wget
+        # would get the same answer, so only retry when curl got no answer
+        if [ "$rc" -eq 22 ]; then
+            return 1
+        fi
         command -v wget >/dev/null && log "WARNING" "curl failed for $1, retrying with wget" >&2
     fi
     if command -v wget >/dev/null; then
@@ -139,6 +155,37 @@ http_get() {
         return 0
     fi
     return 1
+}
+
+free_space_mb() {
+    # Prints the free space in MB of the file system that holds directory $1
+    df -P -k "$1" 2>/dev/null | awk 'NR == 2 { printf "%d\n", $4 / 1024 }'
+}
+
+mem_total_mb() {
+    # Prints the total RAM of the device in MB
+    awk '/^MemTotal:/ { printf "%d\n", $2 / 1024 }' /proc/meminfo 2>/dev/null
+}
+
+is_upx_packed() {
+    # Returns 0 if file $1 is a UPX packed executable. UPX writes the magic
+    # "UPX!" into every packed file, a plain Go binary does not contain it.
+    [ -f "$1" ] && grep -q 'UPX!' "$1" 2>/dev/null
+}
+
+reclaimable_kb() {
+    # Prints how many KB are freed when file $1 is replaced. On OpenWrt
+    # overlay systems only files in the upper layer free space, files from
+    # the read-only firmware image (squashfs) keep using it.
+    if [ ! -f "$1" ] || [ -L "$1" ]; then
+        echo 0
+        return 0
+    fi
+    if [ -d "/overlay/upper" ] && [ ! -f "/overlay/upper$1" ]; then
+        echo 0
+        return 0
+    fi
+    du -k "$1" | awk '{ print $1 }'
 }
 
 # ==============================================================================
@@ -256,12 +303,6 @@ preflight_check() {
     else
         log "SUCCESS" "Available space: $AVAILABLE_SPACE MB"
     fi
-    # Check if xz is present
-    if ! command -v xz >/dev/null; then
-        log "WARNING" "xz is not installed. We can install it for you later."
-    else
-        log "SUCCESS" "xz is installed."
-    fi
     # Check if curl or wget is present (one of them is enough)
     if command -v curl >/dev/null; then
         log "SUCCESS" "curl is installed."
@@ -336,12 +377,57 @@ backup() {
 }
 
 # ==============================================================================
-# Update Logic (Download, Compress, Install)
+# Update Logic (Download, Install)
 # ==============================================================================
+
+set_tiny_asset() {
+    # Sets TINY_ASSET and TINY_DOWNLOAD_PATH for the variant in TINY_VARIANT.
+    # The uncompressed build goes straight into the binary directory, so the
+    # ~27 MB never sit in /tmp, which is RAM on OpenWrt.
+    if [ "$TINY_VARIANT" = "noupx" ]; then
+        TINY_ASSET="tailscaled-noupx-linux-$TINY_ARCH"
+        TINY_DOWNLOAD_PATH="$TAILSCALE_BIN_DIR/tailscaled.new"
+    else
+        TINY_ASSET="tailscaled-linux-$TINY_ARCH"
+        TINY_DOWNLOAD_PATH="/tmp/tailscaled-linux-$TINY_ARCH"
+    fi
+}
+
+select_tiny_variant() {
+    # The UPX compressed build stays the default. --no-upx selects the
+    # uncompressed build: it needs much more flash, but it does not unpack
+    # itself into RAM on every start (issue #95).
+    local free_mb
+    local mem_mb
+    TINY_VARIANT="upx"
+    if [ "$NO_UPX" -eq 1 ]; then
+        free_mb=$(free_space_mb "$TAILSCALE_BIN_DIR")
+        free_mb=${free_mb:-0}
+        if [ "$free_mb" -ge "$NOUPX_MIN_FREE_MB" ]; then
+            TINY_VARIANT="noupx"
+            log "INFO" "--no-upx flag is used. Installing the uncompressed tiny build"
+        elif [ "$IGNORE_FREE_SPACE" -eq 1 ]; then
+            TINY_VARIANT="noupx"
+            log "WARNING" "--ignore-free-space flag is used. Trying the uncompressed tiny build with only $free_mb MB free"
+        else
+            log "WARNING" "The uncompressed tiny build needs about $NOUPX_MIN_FREE_MB MB free space in $TAILSCALE_BIN_DIR, available: $free_mb MB"
+            log "WARNING" "Falling back to the UPX compressed tiny build"
+        fi
+    else
+        mem_mb=$(mem_total_mb)
+        if [ -n "$mem_mb" ] && [ "$mem_mb" -lt "$LOW_RAM_MB" ]; then
+            log "INFO" "This device has only $mem_mb MB RAM. The UPX compressed build unpacks itself into RAM on every start."
+            log "INFO" "With about $NOUPX_MIN_FREE_MB MB free space, --no-upx installs the uncompressed build and saves RAM."
+        fi
+    fi
+    set_tiny_asset
+}
 
 get_latest_tailscale_version_tiny() {
     # Will attempt to download the latest version of tailscale from the updater repository
     # This is the default behavior
+    local installed_variant
+    select_tiny_variant
     log "INFO" "Detecting latest tiny tailscale version"
     TAILSCALE_VERSION_NEW=$(http_get "$TAILSCALE_TINY_URL/version.txt")
     if [ -z "$TAILSCALE_VERSION_NEW" ]; then
@@ -350,22 +436,44 @@ get_latest_tailscale_version_tiny() {
     fi
     TAILSCALE_VERSION_OLD="$("$(tailscale_bin tailscale)" --version | head -1)"
     if [ "$TAILSCALE_VERSION_NEW" = "$TAILSCALE_VERSION_OLD" ] && [ "$FORCE_UPGRADE" -eq 0 ]; then
-        log "SUCCESS" "You already on the latest version: $TAILSCALE_VERSION_OLD"
-        log "INFO" "You can force reinstall with the --force-upgrade flag."
-        log "INFO" "If you encounter issues while using the tiny version, please use the normal version."
-        log "INFO" "You can do this by using the --no-tiny flag."
-        log "INFO" "Make sure to have enough space available. The normal version needs at least 50 MB."
-        exit 0
+        # Both builds carry the same version, so switching between them
+        # must not stop here
+        if is_upx_packed "$TAILSCALE_BIN_DIR/tailscaled"; then
+            installed_variant="upx"
+        else
+            installed_variant="noupx"
+        fi
+        if [ "$installed_variant" = "$TINY_VARIANT" ]; then
+            log "SUCCESS" "You already on the latest version: $TAILSCALE_VERSION_OLD"
+            log "INFO" "You can force reinstall with the --force-upgrade flag."
+            log "INFO" "If you encounter issues while using the tiny version, please use the normal version."
+            log "INFO" "You can do this by using the --no-tiny flag."
+            log "INFO" "Make sure to have enough space available. The normal version needs at least 50 MB."
+            exit 0
+        fi
+        if [ "$TINY_VARIANT" = "noupx" ]; then
+            log "INFO" "Version $TAILSCALE_VERSION_OLD is installed as UPX compressed build. Switching to the uncompressed build"
+        else
+            log "INFO" "Version $TAILSCALE_VERSION_OLD is installed as uncompressed build. Switching to the UPX compressed build"
+        fi
     elif [ "$TAILSCALE_VERSION_NEW" = "$TAILSCALE_VERSION_OLD" ] && [ "$FORCE_UPGRADE" -eq 1 ]; then
         log "WARNING" "--force-upgrade flag is used. Continuing with reinstallation"
     fi
     log "INFO" "The latest tailscale version is: $TAILSCALE_VERSION_NEW"
     log "INFO" "Downloading latest tailscale version"
-    http_download "$TAILSCALE_TINY_URL/tailscaled-linux-$TINY_ARCH" "/tmp/tailscaled-linux-$TINY_ARCH"
+    if ! http_download "$TAILSCALE_TINY_URL/$TINY_ASSET" "$TINY_DOWNLOAD_PATH" && [ "$TINY_VARIANT" = "noupx" ]; then
+        # Releases built before issue #95 have no uncompressed asset
+        log "WARNING" "Could not download the uncompressed tiny build. Older releases do not provide it, or the flash ran full."
+        log "WARNING" "Falling back to the UPX compressed tiny build"
+        TINY_VARIANT="upx"
+        set_tiny_asset
+        http_download "$TAILSCALE_TINY_URL/$TINY_ASSET" "$TINY_DOWNLOAD_PATH"
+    fi
     # Check if download was successful
-    if [ ! -f "/tmp/tailscaled-linux-$TINY_ARCH" ]; then
+    if [ ! -s "$TINY_DOWNLOAD_PATH" ]; then
+        rm -f "$TINY_DOWNLOAD_PATH"
         log "ERROR" "Could not download tailscale. Exiting"
-        log "ERROR" "File not found: /tmp/tailscaled-linux-$TINY_ARCH"
+        log "ERROR" "File not found: $TINY_DOWNLOAD_PATH"
         exit 1
     fi
 }
@@ -380,7 +488,7 @@ get_latest_tailscale_version() {
         log "INFO" "Please download the tailscale archive manually and place it in /tmp/tailscale.tar.gz"
         TAILSCALE_VERSION_NEW="manually"
     else
-        log "INFO" "Detecting latest tailscale version"
+        log "INFO" "Detecting latest official tailscale version on pkgs.tailscale.com"
         if [ "$ARCH" = "aarch64" ]; then
             TAILSCALE_VERSION_NEW=$(http_get https://pkgs.tailscale.com/stable/ | grep -o 'tailscale_[0-9]*\.[0-9]*\.[0-9]*_arm64\.tgz' | head -n 1)
         elif [ "$ARCH" = "armv7l" ]; then
@@ -428,91 +536,45 @@ get_latest_tailscale_version() {
         exit 1
     fi
     log "SUCCESS" "Found tailscale binaries in: $TAILSCALE_SUBDIR_IN_TAR"
-    # Use the pre-collected user preference for UPX compression
-    if [ "$USER_WANTS_UPX" != "${USER_WANTS_UPX#[y]}" ]; then
-        log "INFO" "Compressing binaries with UPX as requested"
-        compress_binaries
-        if [ "$UPX_ERROR" -eq 1 ]; then
-            log "ERROR" "Could not compress tailscale with UPX. Continuing without compression"
-            tar xzf /tmp/tailscale.tar.gz -C /tmp/tailscale
-        fi
-    else
-        log "INFO" "Extracting tailscale without compression"
-        tar xzf /tmp/tailscale.tar.gz -C /tmp/tailscale
-    fi
+    log "INFO" "Extracting tailscale"
+    tar xzf /tmp/tailscale.tar.gz -C /tmp/tailscale
 
     # Removing archive
     rm /tmp/tailscale.tar.gz
+
+    check_space_for_full_binaries
 }
 
-compress_binaries() {
-    log "INFO" "Ensuring xz is present and installing if necessary"
-    opkg update --verbosity=0
-    opkg install --verbosity=0 xz
-    if command -v xz >/dev/null; then
-        log "SUCCESS" "xz is installed."
-    else
-        log "ERROR" "xz is not installed. Skipping compression"
-        UPX_ERROR=1
-        return 1
-    fi
-    log "INFO" "Getting UPX"
-    upx_version="$(
-        http_get "https://api.github.com/repos/upx/upx/releases/latest" |
-            grep -o '"tag_name":"[^"]*"' |
-            sed 's/"tag_name":"//' |
-            sed 's/"//' |
-            tr -d 'v'
-    )"
-
-    if [ "$ARCH" = "aarch64" ]; then
-        UPX_ARCH="arm64"
-    elif [ "$ARCH" = "armv7l" ]; then
-        UPX_ARCH="arm"
-    elif [ "$ARCH" = "x86_64" ]; then
-        UPX_ARCH="amd64"
-    elif [ "$ARCH" = "mips" ]; then
-        UPX_ARCH="$ARCH"
-    fi
-
-    http_download \
-        "https://github.com/upx/upx/releases/download/v${upx_version}/upx-${upx_version}-${UPX_ARCH}_linux.tar.xz" \
-        "/tmp/upx.tar.xz"
-
-    # If download fails, skip compression
-    if [ ! -f "/tmp/upx.tar.xz" ]; then
-        log "ERROR" "Could not download UPX. Skipping compression"
-        log "WARNING" "Extracting tailscale without compression"
-        UPX_ERROR=1
-    else
-        # Extract only the upx binary
-        unxz --decompress --stdout "/tmp/upx.tar.xz" |
-            tar x -C "/tmp/" "upx-${upx_version}-${UPX_ARCH}_linux/upx"
-        mv "/tmp/upx-${upx_version}-${UPX_ARCH}_linux/upx" "/tmp/upx"
-        rmdir "/tmp/upx-${upx_version}-${UPX_ARCH}_linux"
-        rm "/tmp/upx.tar.xz"
-        # Check if the upx binary is present
-        if [ ! -f "/tmp/upx" ]; then
-            log "ERROR" "Could not find UPX binary. Skipping compression"
-            UPX_ERROR=1
+check_space_for_full_binaries() {
+    # The full binaries are no longer UPX compressed on the device, so make
+    # sure they fit before tailscale is stopped and anything is replaced
+    local new_kb
+    local free_kb
+    local needed_kb
+    local name
+    new_kb=0
+    for name in tailscale tailscaled; do
+        if [ -f "/tmp/tailscale/$TAILSCALE_SUBDIR_IN_TAR/$name" ]; then
+            new_kb=$((new_kb + $(du -k "/tmp/tailscale/$TAILSCALE_SUBDIR_IN_TAR/$name" | awk '{ print $1 }')))
+            new_kb=$((new_kb - $(reclaimable_kb "$TAILSCALE_BIN_DIR/$name")))
         fi
-        tar xzf "/tmp/tailscale.tar.gz" "$TAILSCALE_SUBDIR_IN_TAR/tailscale" \
-            -C "/tmp/tailscale"
-        log "INFO" "Compressing tailscale with UPX"
-        log "INFO" "This might take 2-3 minutes, depending on your router."
-        /usr/bin/time -f %e /tmp/upx --lzma "/tmp/tailscale/$TAILSCALE_SUBDIR_IN_TAR/tailscale"
-
-        tar xzf "/tmp/tailscale.tar.gz" "$TAILSCALE_SUBDIR_IN_TAR/tailscaled" \
-            -C "/tmp/tailscale"
-        # Takes 107.92s on GL-AXT1800
-        log "INFO" "Compressing tailscaled with UPX"
-        log "INFO" "This might take 2-3 minutes, depending on your router."
-        /usr/bin/time -f %e /tmp/upx --lzma "/tmp/tailscale/$TAILSCALE_SUBDIR_IN_TAR/tailscaled"
-        # Clean up
-        if [ -f "/tmp/upx" ]; then
-            rm "/tmp/upx"
-        fi
+    done
+    # Keep 1 MB headroom for the config and the backup archive
+    needed_kb=$((new_kb + 1024))
+    free_kb=$(df -P -k "$TAILSCALE_BIN_DIR" 2>/dev/null | awk 'NR == 2 { print $4 }')
+    free_kb=${free_kb:-0}
+    if [ "$free_kb" -ge "$needed_kb" ]; then
+        log "SUCCESS" "Enough space for the full binaries: $((needed_kb / 1024)) MB needed, $((free_kb / 1024)) MB available"
+        return 0
     fi
+    if [ "$IGNORE_FREE_SPACE" -eq 1 ]; then
+        log "WARNING" "--ignore-free-space flag is used. Full binaries need $((needed_kb / 1024)) MB, only $((free_kb / 1024)) MB available"
+        return 0
+    fi
+    log "ERROR" "Not enough space for the full binaries: $((needed_kb / 1024)) MB needed, $((free_kb / 1024)) MB available in $TAILSCALE_BIN_DIR"
+    log "ERROR" "Use the tiny version (run the script without --no-tiny) or free up some space."
+    rm -rf /tmp/tailscale
+    exit 1
 }
 
 cleanup_stale_binaries() {
@@ -565,24 +627,27 @@ install_tailscale() {
 }
 
 install_tiny_tailscale() {
+    # The download path comes from set_tiny_asset, the default keeps the
+    # behaviour from before issue #95
+    local tiny_file="${TINY_DOWNLOAD_PATH:-/tmp/tailscaled-linux-$TINY_ARCH}"
     # Stop tailscale
     stop_tailscale
     cleanup_stale_binaries
     # Moving tailscale to the directory the service starts it from
     log "INFO" "Moving tailscale to $TAILSCALE_BIN_DIR"
     # Check if tailscale binary is present
-    if [ ! -f "/tmp/tailscaled-linux-$TINY_ARCH" ]; then
+    if [ ! -f "$tiny_file" ]; then
         log "ERROR" "Tailscaled binary not found. Exiting"
         exit 1
     fi
-    mv "/tmp/tailscaled-linux-$TINY_ARCH" "$TAILSCALE_BIN_DIR/tailscaled"
+    mv "$tiny_file" "$TAILSCALE_BIN_DIR/tailscaled"
     # Create symlink for tailscale (replaces a separate firmware binary)
     ln -sf "$TAILSCALE_BIN_DIR/tailscaled" "$TAILSCALE_BIN_DIR/tailscale"
     # Make the binary executable
     chmod +x "$TAILSCALE_BIN_DIR/tailscaled"
     # Remove temporary files
     log "INFO" "Removing temporary files"
-    rm -rf /tmp/tailscaled-linux-$TINY_ARCH
+    rm -f "$tiny_file"
     # Restart tailscale
     start_tailscale
 }
@@ -778,9 +843,9 @@ invoke_help() {
     printf "  \033[93m--force\033[0m              \033[97mDo not ask for confirmation\033[0m\n"
     printf "  \033[93m--force-upgrade\033[0m      \033[97mForce upgrade even if already up to date\033[0m\n"
     printf "  \033[93m--restore\033[0m            \033[97mRestore tailscale to factory default\033[0m\n"
-    printf "  \033[93m--no-upx\033[0m             \033[97mDo not compress tailscale with UPX\033[0m\n"
-    printf "  \033[93m--no-download\033[0m        \033[97mDo not download tailscale\033[0m\n"
-    printf "  \033[93m--no-tiny\033[0m            \033[97mDo not use the tiny version of tailscale\033[0m\n"
+    printf "  \033[93m--no-upx\033[0m             \033[97mInstall the uncompressed tiny build (more flash, less RAM)\033[0m\n"
+    printf "  \033[93m--no-download\033[0m        \033[97mUse /tmp/tailscale.tar.gz instead of downloading (only with --no-tiny)\033[0m\n"
+    printf "  \033[93m--no-tiny\033[0m            \033[97mInstall the official full tailscale package from pkgs.tailscale.com\033[0m\n"
     printf "  \033[93m--select-release\033[0m     \033[97mSelect a specific release version\033[0m\n"
     printf "  \033[93m--ssh\033[0m                \033[97mEnable Tailscale SSH support automatically\033[0m\n"
     printf "  \033[93m--skip-config\033[0m        \033[97mSkip automatic configuration and show manual steps instead\033[0m\n"
@@ -816,28 +881,13 @@ collect_user_preferences() {
     log "INFO" "Collecting user preferences before starting the update process"
     echo ""
 
-    # Ask about UPX compression (only if not using tiny version and no flags set)
-    if [ "$NO_TINY" -eq 1 ]; then
-        if [ "$NO_UPX" -eq 1 ]; then
-            USER_WANTS_UPX="n"
-            log "INFO" "--no-upx flag is used. Skipping UPX compression"
-        elif [ "$FORCE" -eq 1 ]; then
-            USER_WANTS_UPX="y"
-            log "INFO" "--force flag is used. UPX compression enabled"
-        else
-            echo "┌────────────────────────────────────────────────────────────────────────────────┐"
-            echo "| UPX Compression                                                                |"
-            echo "| Compressing the binaries will save space but takes 2-3 minutes per binary.     |"
-            echo "| Recommended if you have limited storage space.                                 |"
-            echo "└────────────────────────────────────────────────────────────────────────────────┘"
-            printf "> \033[36mDo you want to compress the binaries with UPX to save space?\033[0m (y/N) "
-            read -r USER_WANTS_UPX
-            USER_WANTS_UPX=$(echo "$USER_WANTS_UPX" | tr 'ABCDEFGHIJKLMNOPQRSTUVWXYZ' 'abcdefghijklmnopqrstuvwxyz')
-            echo ""
-        fi
-    else
-        # Tiny version doesn't need UPX compression
-        USER_WANTS_UPX="n"
+    # The full binaries are no longer UPX compressed on the device
+    if [ "$NO_TINY" -eq 1 ] && [ "$NO_UPX" -eq 1 ]; then
+        log "INFO" "--no-upx has no effect together with --no-tiny. The full binaries are never compressed"
+    fi
+    # --no-download only applies to the full binaries from /tmp/tailscale.tar.gz
+    if [ "$NO_TINY" -eq 0 ] && [ "$NO_DOWNLOAD" -eq 1 ]; then
+        log "INFO" "--no-download only works together with --no-tiny. The tiny build is always downloaded"
     fi
 
     # Ask about SSH (only for GL.iNet routers)
@@ -1194,7 +1244,10 @@ main() {
     else
         # Load the tiny tailscale
         get_latest_tailscale_version_tiny
-        backup || exit 1
+        if ! backup; then
+            rm -f "$TINY_DOWNLOAD_PATH"
+            exit 1
+        fi
         install_tiny_tailscale
         invoke_modify_script
         restart_tailscale
