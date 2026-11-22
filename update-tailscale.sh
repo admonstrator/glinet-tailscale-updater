@@ -4,7 +4,7 @@
 # Description: This script updates tailscale on GL.iNet routers
 # Thread: https://forum.gl-inet.com/t/how-to-update-tailscale-on-arm64/37582
 # Author: Admon
-SCRIPT_VERSION="2026.11.18.01"
+SCRIPT_VERSION="2026.11.22.01"
 SCRIPT_NAME="update-tailscale.sh"
 UPDATE_URL="https://get.admon.me/tailscale-update"
 TAILSCALE_TINY_URL="https://github.com/Admonstrator/glinet-tailscale-updater/releases/latest/download/"
@@ -640,7 +640,14 @@ install_tiny_tailscale() {
         log "ERROR" "Tailscaled binary not found. Exiting"
         exit 1
     fi
-    mv "$tiny_file" "$TAILSCALE_BIN_DIR/tailscaled"
+    # /tmp is RAM, so for the UPX build this mv copies onto the flash and
+    # fails when the flash runs full. Stop instead of starting a broken binary
+    if ! mv "$tiny_file" "$TAILSCALE_BIN_DIR/tailscaled"; then
+        rm -f "$tiny_file"
+        log "ERROR" "Could not install tailscaled into $TAILSCALE_BIN_DIR (flash full?)"
+        log "ERROR" "Free up some space and run the script again, or run it with --restore to go back to the firmware version"
+        exit 1
+    fi
     # Create symlink for tailscale (replaces a separate firmware binary)
     ln -sf "$TAILSCALE_BIN_DIR/tailscaled" "$TAILSCALE_BIN_DIR/tailscale"
     # Make the binary executable
@@ -995,6 +1002,16 @@ choose_release_label() {
     fi
 }
 
+is_valid_script() {
+    # Rejects truncated downloads and error pages before they replace the
+    # running script: shebang, entry point at the end, and valid sh syntax
+    [ -s "$1" ] || return 1
+    [ "$(head -n 1 "$1")" = "#!/bin/sh" ] || return 1
+    grep -q '^main "\$@"' "$1" || return 1
+    sh -n "$1" 2>/dev/null || return 1
+    return 0
+}
+
 invoke_update() {
     log "INFO" "Checking for script updates"
     local update_url="$UPDATE_URL"
@@ -1002,25 +1019,44 @@ invoke_update() {
         update_url="https://raw.githubusercontent.com/admonstrator/glinet-tailscale-updater/testing/update-tailscale.sh"
         log "INFO" "Testing mode: Using testing branch for script updates"
     fi
-    SCRIPT_VERSION_NEW=$(http_get "$update_url" | grep -o 'SCRIPT_VERSION="[0-9]\{4\}\.[0-9]\{2\}\.[0-9]\{2\}\.[0-9]\{2\}"' | cut -d '"' -f 2 || echo "Failed to retrieve scriptversion")
-    if [ -n "$SCRIPT_VERSION_NEW" ] && [ "$SCRIPT_VERSION_NEW" != "$SCRIPT_VERSION" ]; then
+    # Download once and take the version from the very file that gets
+    # installed, so the check and the install can never see different files
+    local new_script="/tmp/$SCRIPT_NAME"
+    if ! http_download "$update_url" "$new_script"; then
+        log "WARNING" "Could not check for script updates. Continuing with the current version"
+        return 0
+    fi
+    SCRIPT_VERSION_NEW=$(grep -o 'SCRIPT_VERSION="[0-9]\{4\}\.[0-9]\{2\}\.[0-9]\{2\}\.[0-9]\{2\}"' "$new_script" | head -n 1 | cut -d '"' -f 2)
+    if [ -z "$SCRIPT_VERSION_NEW" ]; then
+        log "WARNING" "The downloaded update does not look like this script. Continuing with the current version"
+        rm -f "$new_script"
+        return 0
+    fi
+    if [ "$SCRIPT_VERSION_NEW" != "$SCRIPT_VERSION" ]; then
         log "WARNING" "A new version of the script is available: $SCRIPT_VERSION_NEW"
         log "INFO" "Updating the script ..."
-        if ! http_download "$update_url" "/tmp/$SCRIPT_NAME" || [ ! -s "/tmp/$SCRIPT_NAME" ]; then
-            log "ERROR" "Could not download the new script version. Continuing with the current one"
-            rm -f "/tmp/$SCRIPT_NAME"
+        if ! is_valid_script "$new_script"; then
+            log "ERROR" "The downloaded script is incomplete or damaged. Continuing with the current one"
+            rm -f "$new_script"
             return 0
         fi
         # Get current script path
         SCRIPT_PATH=$(readlink -f "$0")
-        # Replace current script with updated script
-        rm "$SCRIPT_PATH"
-        mv /tmp/$SCRIPT_NAME "$SCRIPT_PATH"
-        chmod +x "$SCRIPT_PATH"
+        # Copy next to the current script first. /tmp is RAM and the script
+        # lives on flash, so a full flash must fail here, while the old script
+        # is still in place. The final mv is a rename on the same filesystem.
+        if ! cp "$new_script" "$SCRIPT_PATH.new" || ! chmod +x "$SCRIPT_PATH.new" ||
+            ! mv -f "$SCRIPT_PATH.new" "$SCRIPT_PATH"; then
+            log "ERROR" "Could not replace $SCRIPT_PATH (flash full?). Continuing with the current version"
+            rm -f "$SCRIPT_PATH.new" "$new_script"
+            return 0
+        fi
+        rm -f "$new_script"
         log "INFO" "The script has been updated. It will now restart ..."
         sleep 3
         exec "$SCRIPT_PATH" "$@"
     else
+        rm -f "$new_script"
         log "SUCCESS" "The script is up to date"
     fi
 }

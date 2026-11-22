@@ -898,6 +898,111 @@ jobs:
             --tmpfs /bin_small:size=20m \
             -w /src alpine:3.20 sh /src/test_tiny_variant.sh
 
+  self-update-tests:
+    name: Self-Update Robustness Tests
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Write self-update test
+        run: |
+          cat > "$RUNNER_TEMP/test_self_update.sh" << 'EOF'
+          #!/bin/sh
+          # invoke_update must never replace the script with a broken file.
+          # /src = repo, /flash = 1 MB tmpfs that stands in for a full flash
+          set -u
+          PASS=0
+          FAIL=0
+          ok() { PASS=$((PASS + 1)); echo "PASS: $1"; }
+          ko() { FAIL=$((FAIL + 1)); echo "FAIL: $1"; }
+
+          SRC=/src/update-tailscale.sh
+          installed_version() { sed -n 's/^SCRIPT_VERSION="\(.*\)"$/\1/p' "$1" | head -n 1; }
+          CUR_VERSION=$(installed_version "$SRC")
+          sed '$d' "$SRC" >/tmp/lib.sh
+          mkdir -p /tmp/cases /inst
+
+          # Update candidates. Only the version line differs from the current script
+          sed 's/^SCRIPT_VERSION=.*/SCRIPT_VERSION="2099.01.01.01"/' "$SRC" >/tmp/cases/newer.sh
+          head -n 500 /tmp/cases/newer.sh >/tmp/cases/truncated.sh
+          sed '$i if then fi' /tmp/cases/newer.sh >/tmp/cases/syntax.sh
+          echo '<html><body>Captive portal</body></html>' >/tmp/cases/html.sh
+          cp "$SRC" /tmp/cases/same.sh
+          printf '#!/bin/sh\nSCRIPT_VERSION="2099.01.01.01"\nmain() { echo "NEW SCRIPT RAN"; }\nmain "$@"\n' >/tmp/cases/good.sh
+
+          # Runs invoke_update with $0 = $1 (the installed script) and the
+          # download served from /tmp/cases/$2 (missing file = failed download)
+          run_update() {
+              CASE=$2
+              export CASE
+              sh -c '
+                  . /tmp/lib.sh
+                  sleep() { :; }
+                  http_download() {
+                      [ -f "/tmp/cases/$CASE" ] || { rm -f "$2"; return 1; }
+                      cp "/tmp/cases/$CASE" "$2"
+                  }
+                  invoke_update
+              ' "$1" 2>&1
+          }
+
+          expect_kept() {
+              # $1 case, $2 expected message
+              cp "$SRC" /inst/update-tailscale.sh
+              out=$(run_update /inst/update-tailscale.sh "$1")
+              if [ "$(installed_version /inst/update-tailscale.sh)" = "$CUR_VERSION" ] &&
+                  echo "$out" | grep -q "$2" &&
+                  [ ! -e /inst/update-tailscale.sh.new ] && [ ! -e "/tmp/update-tailscale.sh" ]; then
+                  ok "$1: current script kept"
+              else
+                  ko "$1: $out"
+              fi
+          }
+
+          expect_kept missing "Could not check for script updates"
+          expect_kept html.sh "does not look like this script"
+          expect_kept same.sh "The script is up to date"
+          expect_kept truncated.sh "incomplete or damaged"
+          expect_kept syntax.sh "incomplete or damaged"
+
+          # A valid update replaces the script and execs the new version
+          cp "$SRC" /inst/update-tailscale.sh
+          out=$(run_update /inst/update-tailscale.sh good.sh)
+          if [ "$(installed_version /inst/update-tailscale.sh)" = "2099.01.01.01" ] &&
+              [ -x /inst/update-tailscale.sh ] && echo "$out" | grep -q "NEW SCRIPT RAN" &&
+              [ ! -e /inst/update-tailscale.sh.new ]; then
+              ok "good.sh: script replaced and restarted"
+          else
+              ko "good.sh: $out"
+          fi
+
+          # Full flash: the copy fails while the old script is still in place
+          cp "$SRC" /flash/update-tailscale.sh
+          dd if=/dev/zero of=/flash/fill bs=1024 2>/dev/null
+          out=$(run_update /flash/update-tailscale.sh good.sh)
+          if [ "$(installed_version /flash/update-tailscale.sh)" = "$CUR_VERSION" ] &&
+              sh -n /flash/update-tailscale.sh && echo "$out" | grep -q "flash full" &&
+              [ ! -e /flash/update-tailscale.sh.new ]; then
+              ok "full flash: current script kept intact"
+          else
+              ko "full flash: $out"
+          fi
+
+          echo "== $PASS passed, $FAIL failed"
+          [ "$FAIL" -eq 0 ]
+          EOF
+
+      - name: Run self-update tests in an isolated container
+        run: |
+          docker run --rm \
+            -v "$PWD/update-tailscale.sh:/src/update-tailscale.sh:ro" \
+            -v "$RUNNER_TEMP/test_self_update.sh:/src/test_self_update.sh:ro" \
+            --tmpfs /flash:size=1m \
+            -w /src alpine:3.20 sh /src/test_self_update.sh
+
   log-function-tests:
     name: Log Function Tests
     runs-on: ubuntu-latest
@@ -1021,6 +1126,7 @@ jobs:
             "invoke_outro"
             "invoke_help"
             "invoke_update"
+            "is_valid_script"
             "invoke_modify_script"
             "restart_tailscale"
             "start_tailscale"
