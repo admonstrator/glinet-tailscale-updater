@@ -20,6 +20,14 @@ If you find this tool helpful, consider supporting its development:
 
 ---
 
+> [!CAUTION]
+> **SECURITY WARNING: GL.iNet devices may be compromised!**
+> **Check your device: [gl-i.net/security/csa-2026-01](https://gl-i.net/security/csa-2026-01/)**
+>
+> — Admon (maintainer of this script)
+
+---
+
 ## 📖 About
 
 This script automatically fetches and installs the latest Tailscale version, optimized specifically for GL.iNet routers. Keep your Tailscale installation current with just one command!
