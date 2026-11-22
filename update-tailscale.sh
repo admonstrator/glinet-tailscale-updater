@@ -871,6 +871,7 @@ invoke_intro() {
     echo ""
     printf " \033[1;31mSECURITY WARNING: GL.iNet devices may be compromised (CSA-2026-01)!\033[0m\n"
     printf " \033[1;31mCheck your device: https://gl-i.net/security/csa-2026-01/\033[0m\n"
+    printf " \033[31m— Admon (maintainer of this script)\033[0m\n"
     echo ""
     echo "============================================================"
     echo ""
