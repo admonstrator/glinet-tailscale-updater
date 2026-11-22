@@ -4,7 +4,7 @@
 # Description: This script updates tailscale on GL.iNet routers
 # Thread: https://forum.gl-inet.com/t/how-to-update-tailscale-on-arm64/37582
 # Author: Admon
-SCRIPT_VERSION="2026.11.22.01"
+SCRIPT_VERSION="2026.11.22.02"
 SCRIPT_NAME="update-tailscale.sh"
 UPDATE_URL="https://get.admon.me/tailscale-update"
 TAILSCALE_TINY_URL="https://github.com/Admonstrator/glinet-tailscale-updater/releases/latest/download/"
