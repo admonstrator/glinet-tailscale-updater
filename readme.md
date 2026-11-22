@@ -21,8 +21,8 @@ If you find this tool helpful, consider supporting its development:
 ---
 
 > [!CAUTION]
-> **SECURITY WARNING: GL.iNet devices are currently exploitable!**
-> **Read advisory [CSA-2026-01](https://gl-i.net/security/csa-2026-01/) and secure your device before doing anything else.**
+> **SECURITY WARNING: GL.iNet devices may be compromised (CSA-2026-01)!**
+> **Check your device: [gl-i.net/security/csa-2026-01](https://gl-i.net/security/csa-2026-01/)**
 
 ---
 
